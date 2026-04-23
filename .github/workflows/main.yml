@@ -2,30 +2,33 @@ name: 5min-Notice-Bot
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # 5분마다 실행 (UTC 기준)
-  workflow_dispatch:        # 수동으로 실행해볼 수 있는 버튼 생성
+    - cron: '*/5 * * * *'  # 5분마다 실행
+  workflow_dispatch:       # 수동 실행 버튼
   push:
-    branches: [ "main" ]    # 코드를 수정해서 올릴 때도 테스트로 실행됨
+    branches: [ "main" ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 파일 쓰기 권한 명시
+      contents: write 
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4 # v3에서 v4로 업데이트 (권한 처리가 더 안정적임)
+        uses: actions/checkout@v4
         with:
-          persist-credentials: true # 권한 유지를 명시적으로 설정
+          persist-credentials: true
 
       - name: Set up Python
-        uses: actions/setup-python@v5 # 최신 버전 python 설정 사용
+        uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
       - name: Install Dependencies
-        run: pip install requests beautifulsoup4
+        run: |
+          pip install requests playwright
+          # 핵심: Playwright용 브라우저 엔진 설치 명령어가 반드시 필요합니다!
+          playwright install chromium
 
       - name: Run Bot
         run: python bot.py
@@ -35,10 +38,11 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # 파일이 아직 없더라도 에러 나지 않게 함
-          git add last_notice.txt || true
+          # 파일이 없으면 생성해 줌으로써 에러 방지
+          touch last_notice.txt
           
-          # 변경사항이 있을 때만 커밋 (변경사항 없으면 조용히 넘어감)
+          git add last_notice.txt
+          
           if ! git diff --cached --quiet; then
             git commit -m "Update last notice"
             git push
