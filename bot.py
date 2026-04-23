@@ -16,7 +16,7 @@ def check_notice():
 
         # [수정 필요] 사이트의 공지사항 제목 태그를 정확히 찾아야 합니다.
         # 예: soup.select_one('.notice_title').text
-        latest_title = soup.select_one('여기에_공지제목_CSS_선택자').text.strip()
+        latest_title = soup.select('.board-notice-list .title-cell')[0].text.strip()
 
         # 이전 공지와 비교
         last_title = ""
