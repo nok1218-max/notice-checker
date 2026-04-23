@@ -1,71 +1,79 @@
-import requests
-from bs4 import BeautifulSoup
 import os
+import asyncio
+from playwright.async_api import async_playwright
+import requests
 
-# 1. 설정값 (본인의 정보로 확인)
+# 1. 설정값
 WEBHOOK_URL = "https://discord.com/api/webhooks/1496774829611679744/_keUpah8H1wPyBqMbhosb_71dr4amHQvyguQC6wpqpzNeb1rVj8I0uayV53RwTsEMvej"
 TARGET_URL = "https://maple.land/board/notices"
 DB_FILE = "last_notice.txt"
 
-def check_notice():
-    try:
-        # 차단 방지를 위한 브라우저 헤더 설정
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
-        }
+async def check_notice():
+    async with async_playwright() as p:
+        # 브라우저 실행
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
         
-        res = requests.get(TARGET_URL, headers=headers, timeout=15)
-        res.raise_for_status()
-        
-        soup = BeautifulSoup(res.text, 'html.parser')
-
-        # 이미지 기반 최신 CSS 선택자 적용
-        # 메이플랜드는 현재 flex 구조의 div를 사용 중입니다.
-        notice_elements = soup.select('div.flex.flex-col.sm\:flex-row.sm\:items-center')
-        
-        if not notice_elements:
-            # 보조 선택자 (클래스명이 바뀔 경우 대비)
-            notice_elements = soup.select('div[class*="transition-colors"]')
-
-        if not notice_elements:
-            print("❌ 공지사항 목록을 찾을 수 없습니다. 사이트 구조가 변경되었을 수 있습니다.")
-            return
-
-        # 가장 첫 번째(최신) 공지 텍스트 추출 및 정리
-        latest_title = notice_elements[0].get_text(separator=' ', strip=True)
-        
-        # 이전 기록 읽기
-        last_title = ""
-        if os.path.exists(DB_FILE):
-            with open(DB_FILE, "r", encoding="utf-8") as f:
-                last_title = f.read().strip()
-
-        # [비교 로직] 새 공지가 떴을 때만 발송
-        if latest_title != last_title:
-            print(f"✅ 새 공지 발견: {latest_title}")
+        try:
+            # 페이지 접속 (네트워크가 조용해질 때까지 대기)
+            await page.goto(TARGET_URL, wait_until="networkidle")
             
-            # 디스코드 전송 (내용 예쁘게 Embed 형식으로)
-            payload = {
-                "embeds": [{
-                    "title": "📢 메이플랜드 새로운 공지사항",
-                    "description": latest_title,
-                    "url": TARGET_URL,
-                    "color": 16753920 # 주황색
-                }]
-            }
-            
-            requests.post(WEBHOOK_URL, json=payload)
-            
-            # 새 제목 저장
-            with open(DB_FILE, "w", encoding="utf-8") as f:
-                f.write(latest_title)
-        else:
-            print(f"😴 새로운 공지가 없습니다. (현재 최신: {latest_title})")
+            # 공지사항 요소가 렌더링될 때까지 대기
+            await page.wait_for_selector('div.min-w-0.flex-1')
 
-    except Exception as e:
-        print(f"⚠️ 오류 발생: {e}")
+            # 모든 공지 행(row)을 가져옵니다.
+            rows = page.locator('div.min-w-0.flex-1')
+            count = await rows.count()
+            
+            latest_title = ""
+            
+            for i in range(count):
+                text = await rows.nth(i).inner_text()
+                text = text.strip()
+                
+                # "공지사항", "카테고리", "제목" 등 헤더 문구가 포함되면 건너뜁니다.
+                if text == "공지사항" or text == "제목" or not text:
+                    continue
+                
+                # 첫 번째로 만나는 유효한 텍스트가 진짜 최신 공지입니다.
+                # 줄바꿈이 있으면 한 줄로 합쳐줍니다.
+                latest_title = " ".join(text.split())
+                break
+
+            if not latest_title:
+                print("❌ 공지사항 본문을 찾을 수 없습니다.")
+                return
+
+            # 이전 기록 읽기
+            last_title = ""
+            if os.path.exists(DB_FILE):
+                with open(DB_FILE, "r", encoding="utf-8") as f:
+                    last_title = f.read().strip()
+
+            # [비교 로직]
+            if latest_title != last_title:
+                print(f"✅ 새 공지 발견: {latest_title}")
+                
+                payload = {
+                    "embeds": [{
+                        "title": "📢 메이플랜드 새로운 공지사항",
+                        "description": latest_title,
+                        "url": TARGET_URL,
+                        "color": 16753920 # 주황색
+                    }]
+                }
+                requests.post(WEBHOOK_URL, json=payload)
+                
+                # 새 제목 저장
+                with open(DB_FILE, "w", encoding="utf-8") as f:
+                    f.write(latest_title)
+            else:
+                print(f"😴 새로운 공지가 없습니다. (현재 최신: {latest_title})")
+
+        except Exception as e:
+            print(f"⚠️ 오류 발생: {e}")
+        finally:
+            await browser.close()
 
 if __name__ == "__main__":
-    check_notice()
+    asyncio.run(check_notice())
