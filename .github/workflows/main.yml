@@ -4,18 +4,23 @@ on:
   schedule:
     - cron: '*/5 * * * *'  # 5분마다 실행 (UTC 기준)
   workflow_dispatch:        # 수동으로 실행해볼 수 있는 버튼 생성
+  push:
+    branches: [ "main" ]    # 코드를 수정해서 올릴 때도 테스트로 실행됨
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 파일 쓰기 권한 (중복 방지용)
+      contents: write # 파일 쓰기 권한 명시
+
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4 # v3에서 v4로 업데이트 (권한 처리가 더 안정적임)
+        with:
+          persist-credentials: true # 권한 유지를 명시적으로 설정
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # 최신 버전 python 설정 사용
         with:
           python-version: '3.9'
 
@@ -25,10 +30,18 @@ jobs:
       - name: Run Bot
         run: python bot.py
 
-      - name: Save Last Notice # 새 공지 제목을 깃허브에 저장하여 중복 방지
+      - name: Save Last Notice
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add last_notice.txt
-          git commit -m "Update last notice" || exit 0
-          git push
+          
+          # 파일이 아직 없더라도 에러 나지 않게 함
+          git add last_notice.txt || true
+          
+          # 변경사항이 있을 때만 커밋 (변경사항 없으면 조용히 넘어감)
+          if ! git diff --cached --quiet; then
+            git commit -m "Update last notice"
+            git push
+          else
+            echo "변경사항이 없습니다."
+          fi
