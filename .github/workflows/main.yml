@@ -16,8 +16,6 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -27,25 +25,22 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install requests playwright
-          # 핵심: Playwright용 브라우저 엔진 설치 명령어가 반드시 필요합니다!
           playwright install chromium
 
       - name: Run Bot
         run: python bot.py
 
-      - name: Save Last Notice
+      - name: Save Records
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # 파일이 없으면 생성해 줌으로써 에러 방지
-          touch last_notice.txt
-          
-          git add last_notice.txt
+          # 모든 last_...txt 파일(공지사항, 이벤트, 개발일지)을 추가
+          git add last_*.txt || true
           
           if ! git diff --cached --quiet; then
-            git commit -m "Update last notice"
+            git commit -m "Update notices, events, and devlog"
             git push
           else
-            echo "변경사항이 없습니다."
+            echo "변경사항 없음"
           fi
