@@ -19,7 +19,6 @@ async def check_board(context, board_info):
     page = await context.new_page()
     try:
         print(f"🔍 {name} 탭 스캔 시작...")
-        # 60초까지 넉넉하게 대기
         await page.goto(list_url, wait_until="networkidle", timeout=60000)
         
         current_data = []
@@ -31,43 +30,52 @@ async def check_board(context, board_info):
             if i >= await rows.count(): break
             
             title_text = (await rows.nth(i).inner_text()).strip()
-            # 메뉴나 잡음 텍스트 필터링
             if len(title_text) < 2 or title_text in ["공지사항", "이벤트", "개발일지"]: continue
             
             print(f"    └ [{i+1}/5] 클릭: {title_text[:15]}...")
             await rows.nth(i).click()
             
             try:
-                # 1. 상세 페이지 로딩 대기 강화 (네트워크 활동이 멈출 때까지)
+                # 상세 페이지 로딩 대기
                 await page.wait_for_load_state("networkidle", timeout=30000)
                 detail_url = page.url
                 
-                # 2. 본문 영역이 나타날 때까지 대기
-                # Mapleland의 본문 구조는 div.prose가 주를 이루지만, 대안 선택자도 추가
-                await page.wait_for_selector('div.prose, article, main', timeout=30000)
-                
-                # 3. [핵심] 특정 태그에 의존하지 않고 화면상의 텍스트를 긁어오기
-                # evaluate를 사용하면 브라우저 내부에서 렌더링된 텍스트를 직접 가져옵니다.
-                full_content = await page.evaluate("""() => {
-                    const el = document.querySelector('div.prose') || document.querySelector('article') || document.querySelector('main');
-                    return el ? el.innerText : document.body.innerText;
+                # 1. [핵심] 불필요한 요소(조회수, 시간, 하단 추천글) 제거 후 본문만 추출
+                # evaluate를 사용하여 브라우저 내부에서 지저분한 것들을 치우고 텍스트를 가져옵니다.
+                clean_content = await page.evaluate("""() => {
+                    // 본문 영역 선택 (div.prose가 메이플랜드 본문 핵심)
+                    const contentEl = document.querySelector('div.prose');
+                    if (!contentEl) return "";
+
+                    // 복사본을 만들어 작업 (원본 훼손 방지)
+                    const clone = contentEl.cloneNode(true);
+                    
+                    // 조회수, 작성일, 댓글수 등 숫자가 자주 바뀌는 요소의 클래스/태그 제거
+                    // 보통 공지사항 하단이나 상단에 있는 시간/조회수 관련 요소를 타겟팅합니다.
+                    const excludes = clone.querySelectorAll('span, div.text-gray-400, .view-count, .date');
+                    excludes.forEach(el => el.remove());
+
+                    return clone.innerText;
                 }""")
                 
-                clean_content = " ".join(full_content.split()).strip()
+                # 2. 공백 정제 및 글자수 제한
+                # 앞뒤 공백을 제거하고, 연속된 공백을 하나로 합칩니다.
+                refined_text = " ".join(clean_content.split()).strip()
                 
-                # 본문이 너무 짧으면 로딩 실패로 간주하고 저장 안 함 (중복 전송 방지)
-                if len(clean_content) > 10:
-                    current_data.append(f"{title_text}||{clean_content[:1000]}||{detail_url}")
-                    print(f"      ✅ 수집 성공 ({len(clean_content)}자)")
+                # 3. 데이터 저장 (비교용 데이터는 앞쪽 500자만 사용 - 하단 잡음 차단)
+                if len(refined_text) > 10:
+                    # 제목 + 본문앞부분 + URL을 하나의 고유 키로 생성
+                    current_data.append(f"{title_text}||{refined_text[:500]}||{detail_url}")
+                    print(f"      ✅ 수집 성공 ({len(refined_text)}자)")
                 else:
-                    print(f"      ⚠️ 본문 내용 부족으로 제외")
-                
+                    print(f"      ⚠️ 본문 내용이 너무 짧아 제외")
+
             except Exception as e:
-                print(f"      ⚠️ 본문 읽기 실패: {type(e).__name__}")
+                print(f"      ⚠️ 상세 페이지 분석 실패: {type(e).__name__}")
             
-            # 목록으로 다시 이동 (안정성을 위해 goto 사용)
+            # 목록으로 다시 이동
             await page.goto(list_url, wait_until="domcontentloaded")
-            await asyncio.sleep(2)
+            await asyncio.sleep(1.5)
 
         # 비교 및 저장 로직
         old_data = []
@@ -81,26 +89,28 @@ async def check_board(context, board_info):
                 parts = item.split("||")
                 if len(parts) < 3: continue
                 title, _, d_url = parts
-                msg = f"**[{name}] 새 소식**\n{d_url}" if is_first_run else f"**[{name}] 내용 수정 감지!**\n{d_url}"
-                requests.post(WEBHOOK_URL, json={"content": msg})
+                
+                # 첫 실행 알림 방지 로직 (파일이 없을 땐 기록만 하고 알림은 안 보냄)
+                if not is_first_run:
+                    msg = f"**[{name}] 내용 수정 또는 새 소식!**\n{d_url}"
+                    requests.post(WEBHOOK_URL, json={"content": msg})
 
+        # 새로운 데이터로 TXT 파일 갱신
         if current_data:
             with open(db_file, "w", encoding="utf-8") as f:
                 f.write("\n".join(current_data))
-            print(f"💾 {name} 기록 완료")
+            print(f"💾 {name} 파일 업데이트 완료")
 
     except Exception as e:
-        print(f"❌ {name} 탭 치명적 오류: {e}")
+        print(f"❌ {name} 치명적 오류: {e}")
     finally:
         await page.close()
 
 async def main():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={'width': 1920, 'height': 1080}
-        )
+        # 다크 모드 등 스타일 영향을 최소화하기 위해 기본 context 사용
+        context = await browser.new_context(viewport={'width': 1280, 'height': 800})
         for target in TARGETS:
             await check_board(context, target)
         await browser.close()
