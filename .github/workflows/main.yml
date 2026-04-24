@@ -25,7 +25,6 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install requests playwright
-          # 브라우저 설치뿐만 아니라 필요한 시스템 라이브러리까지 설치
           playwright install --with-deps chromium
 
       - name: Run Bot
@@ -36,15 +35,15 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # 파일이 아직 생성되지 않았을 경우를 대비해 git add 전 체크
-          git add last_*.txt || echo "파일이 존재하지 않음"
+          # 1. 파일이 처음 생길 때를 대비해 모든 변경사항(-A)을 추가합니다.
+          git add -A
           
-          # 변경 사항이 있는지 확인 후 커밋/푸시
+          # 2. 변경 사항이 있는지 확인 후 처리
           if ! git diff --cached --quiet; then
             git commit -m "Update notices, events, and devlog"
-            # 깃허브 액션에서 푸시할 때 발생할 수 있는 충돌 방지를 위해 pull 후 push
-            git pull --rebase
-            git push
+            # 3. 충돌 방지를 위해 pull 후 push
+            git pull --rebase origin main
+            git push origin main
           else
             echo "변경사항 없음"
           fi
