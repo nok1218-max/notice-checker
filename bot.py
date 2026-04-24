@@ -3,7 +3,6 @@ import asyncio
 from playwright.async_api import async_playwright
 import requests
 
-# 1. 설정값 (디스코드 웹훅 주소)
 WEBHOOK_URL = "https://discord.com/api/webhooks/1496774829611679744/_keUpah8H1wPyBqMbhosb_71dr4amHQvyguQC6wpqpzNeb1rVj8I0uayV53RwTsEMvej"
 
 TARGETS = [
@@ -24,64 +23,65 @@ async def check_board(context, board_info):
         
         current_data = []
         
-        for i in range(5):
-            await page.wait_for_selector('div.min-w-0.flex-1', timeout=30000)
-            rows = page.locator('div.min-w-0.flex-1')
+        # 목록 요소가 뜰 때까지 대기
+        await page.wait_for_selector('div.min-w-0.flex-1', timeout=30000)
+        rows_locator = page.locator('div.min-w-0.flex-1')
+        count = await rows_locator.count()
+
+        processed_count = 0
+        for i in range(count):
+            if processed_count >= 5: break # 상위 5개만
+
+            row = rows_locator.nth(i)
+            title_text = (await row.inner_text()).strip()
             
-            if i >= await rows.count(): break
-            
-            title_text = (await rows.nth(i).inner_text()).strip()
-            # 메뉴명이나 짧은 텍스트 필터링
-            if len(title_text) < 2 or title_text in ["공지사항", "이벤트", "개발일지"]: continue
-            
-            print(f"    └ [{i+1}/5] 클릭: {title_text[:15]}...")
-            await rows.nth(i).click()
+            # [필터링] 무의미한 텍스트 및 메뉴 제목 건너뛰기
+            if title_text in ["공지사항", "이벤트", "개발일지", "카테고리", "제목", ""] or len(title_text) < 2:
+                continue
+
+            print(f"    └ [{processed_count+1}/5] 클릭: {title_text[:15]}...")
+            await row.click()
+            processed_count += 1
             
             try:
-                # 상세 페이지 로딩 대기
-                await page.wait_for_load_state("networkidle", timeout=30000)
+                # 1. 상세 페이지 로딩 대기 (DOM이 완성될 때까지)
+                await page.wait_for_load_state("domcontentloaded")
+                await asyncio.sleep(2) # 렌더링 시간 추가 확보
                 detail_url = page.url
                 
-                # 2. [핵심] 조회수, 날짜 등 잡음 제거 로직 (JS 실행)
-                clean_content = await page.evaluate("""() => {
-                    const contentEl = document.querySelector('div.prose') || document.querySelector('article');
-                    if (!contentEl) return "";
-
-                    const clone = contentEl.cloneNode(true);
-                    
-                    // 조회수, 작성일, 댓글수, 하단 메뉴 등 수시로 변하는 요소의 클래스/태그 제거
-                    const selectorsToRemove = [
-                        '.view-count', '.date', '.comment-count', 
-                        'span.text-gray-400', 'div.flex.items-center.gap-2',
-                        'header', 'footer', 'button', 'nav'
-                    ];
-                    
-                    selectorsToRemove.forEach(s => {
-                        const elements = clone.querySelectorAll(s);
-                        elements.forEach(el => el.remove());
-                    });
-
-                    return clone.innerText;
+                # 2. 본문 추출 (더 넓은 선택자 사용: prose 또는 article 또는 main)
+                # 메이플랜드 상세 페이지의 글 내용 영역을 강제로 긁음
+                full_content = await page.evaluate("""() => {
+                    const selectors = ['div.prose', 'article', 'main', '.min-h-screen'];
+                    for (let s of selectors) {
+                        const el = document.querySelector(s);
+                        if (el && el.innerText.length > 50) {
+                            // 조회수, 날짜 등 숫자 포함 요소 제거 시도
+                            const junk = el.querySelectorAll('.view-count, .date, span.text-gray-400');
+                            junk.forEach(j => j.remove());
+                            return el.innerText;
+                        }
+                    }
+                    return document.body.innerText; // 최후의 수단
                 }""")
                 
-                # 3. 텍스트 정제 (연속 공백 제거 및 제목 결합)
-                refined_text = " ".join(clean_content.split()).strip()
+                refined_text = " ".join(full_content.split()).strip()
                 
-                # 본문이 정상적으로 읽혔을 때만 저장 (앞 500자만 비교하여 변동 최소화)
-                if len(refined_text) > 10:
+                # 본문이 어느 정도 로딩되었을 때만 저장
+                if len(refined_text) > 20:
                     current_data.append(f"{title_text}||{refined_text[:500]}||{detail_url}")
-                    print(f"      ✅ 수집 완료")
+                    print(f"      ✅ 수집 성공 ({len(refined_text)}자)")
                 else:
-                    print(f"      ⚠️ 본문 로딩 실패로 스킵")
+                    print(f"      ⚠️ 본문 로딩 미흡 (스킵)")
 
             except Exception as e:
-                print(f"      ⚠️ 본문 읽기 실패: {type(e).__name__}")
+                print(f"      ⚠️ 읽기 오류: {type(e).__name__}")
             
-            # 목록으로 다시 이동
+            # 다시 목록으로 (안정성을 위해 주소 직접 이동)
             await page.goto(list_url, wait_until="domcontentloaded")
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2)
 
-        # 기존 데이터와 비교
+        # 비교/알림/저장 로직
         old_data = []
         is_first_run = not os.path.exists(db_file)
         if not is_first_run:
@@ -93,13 +93,9 @@ async def check_board(context, board_info):
                 parts = item.split("||")
                 if len(parts) < 3: continue
                 title, _, d_url = parts
-                
-                # 첫 실행 시에는 기록만 하고 알림은 안 보냄 (중복 방지)
                 if not is_first_run:
-                    msg = f"**[{name}] 내용 수정 또는 새 소식!**\n{d_url}"
-                    requests.post(WEBHOOK_URL, json={"content": msg})
+                    requests.post(WEBHOOK_URL, json={"content": f"**[{name}] 새 소식/수정**\n{d_url}"})
 
-        # 파일 갱신
         if current_data:
             with open(db_file, "w", encoding="utf-8") as f:
                 f.write("\n".join(current_data))
