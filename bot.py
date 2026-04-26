@@ -22,9 +22,12 @@ async def check_board(context, board_info):
         print(f"🔍 {name} 탭 스캔 시작...")
         await page.goto(list_url, wait_until="networkidle", timeout=60000)
         
-        current_data = []
-        await page.wait_for_selector('div.min-w-0.flex-1', timeout=30000)
+        # (제목, URL) 튜플을 담을 리스트
+        current_data_with_url = []
+        # 파일 저장용 제목 리스트
+        current_titles = []
         
+        await page.wait_for_selector('div.min-w-0.flex-1', timeout=30000)
         rows = page.locator('div.min-w-0.flex-1')
         count = await rows.count()
 
@@ -32,51 +35,52 @@ async def check_board(context, board_info):
         for i in range(count):
             if processed_count >= 5: break
             
-            # 제목 추출 및 내부 줄바꿈 제거
+            # 제목 추출 및 전처리
             raw_title = await rows.nth(i).inner_text()
             title_text = " ".join(raw_title.split()).strip()
+            
+            # [수정] 제목 끝의 'N' 표시 제거
+            if title_text.endswith(' N'):
+                title_text = title_text[:-2].strip()
             
             if title_text in ["공지사항", "이벤트", "개발일지", "카테고리", "제목", ""] or len(title_text) < 2:
                 continue
             
-            # 상세 페이지 클릭하여 고유 URL 추출
+            # 상세 페이지로 이동하여 URL 획득
             await rows.nth(i).click()
             await page.wait_for_load_state("domcontentloaded")
-            await asyncio.sleep(1) # URL 확정 대기
+            await asyncio.sleep(0.5) 
             detail_url = page.url
             
-            # [수정] 제목과 URL만 깔끔하게 한 줄로 저장 (본문 제외)
+            # 데이터 수집 (알림용에는 URL 포함, 저장용에는 제목만)
             if detail_url and "board" in detail_url:
-                current_data.append(f"{title_text}||{detail_url}")
+                current_data_with_url.append((title_text, detail_url))
+                current_titles.append(title_text)
                 print(f"    ✅ 수집: {title_text[:20]}")
                 processed_count += 1
             
+            # 목록으로 복귀
             await page.goto(list_url, wait_until="domcontentloaded")
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
 
-        # 기존 파일 읽기
-        old_data = []
+        # 기존 파일 읽기 (제목 리스트)
+        old_titles = []
         if os.path.exists(db_file):
             with open(db_file, "r", encoding="utf-8") as f:
-                # 빈 줄 제외하고 깔끔하게 읽기
-                old_data = [line.strip() for line in f if line.strip()]
+                old_titles = [line.strip() for line in f if line.strip()]
 
-        # 비교 및 새 소식 알림
-        for item in reversed(current_data):
-            if item not in old_data:
-                # item은 "제목||URL" 형태
-                parts = item.split("||")
-                if len(parts) == 2:
-                    title, d_url = parts
-                    if old_data: # 첫 실행이 아닐 때만 알림
-                        msg = f"**[{name}] 새 소식**\n{title}\n{d_url}"
-                        requests.post(WEBHOOK_URL, json={"content": msg})
+        # 비교 및 알림 (제목만으로 중복 체크)
+        for title, d_url in reversed(current_data_with_url):
+            if title not in old_titles:
+                if old_titles: # 첫 실행이 아닐 때만 알림
+                    msg = f"**[{name}] 새 소식**\n{title}\n{d_url}"
+                    requests.post(WEBHOOK_URL, json={"content": msg})
 
-        # 파일 저장 (한 줄에 하나씩)
-        if current_data:
+        # 파일 저장 (제목만 저장하여 URL/N 유무로 인한 중복 발생 방지)
+        if current_titles:
             with open(db_file, "w", encoding="utf-8") as f:
-                f.write("\n".join(current_data))
-            print(f"💾 {name} 파일 저장 완료")
+                f.write("\n".join(current_titles))
+            print(f"💾 {name} 파일 저장 완료 (제목만)")
 
     except Exception as e:
         print(f"❌ {name} 에러: {e}")
