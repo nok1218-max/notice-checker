@@ -20,95 +20,89 @@ async def check_board(context, board_info):
     page = await context.new_page()
     try:
         print(f"🔍 {name} 스캔 시작...")
-        # 페이지 로딩 대기
-        await page.goto(list_url, wait_until="networkidle", timeout=30000)
+        # 데이터가 확실히 로드되도록 networkidle 대기
+        await page.goto(list_url, wait_until="networkidle", timeout=40000)
         
-        # [핵심] 스크린샷에서 확인된 리스트 컨테이너가 나타날 때까지 대기
+        # 리스트 박스 대기
         container_selector = "div.w-full.overflow-x-auto.rounded-lg"
-        await page.wait_for_selector(container_selector, timeout=15000)
+        await page.wait_for_selector(container_selector, timeout=20000)
         
-        # 컨테이너 바로 아래에 있는 게시글 아이템(div)들만 선택
-        # 메뉴 텍스트가 섞이는 것을 방지하기 위해 자식 결합자(>) 사용
+        # 실제 게시글 행(div) 추출
         rows = page.locator(f"{container_selector} > div.flex.flex-col")
         count = await rows.count()
 
-        current_data = [] # (제목, URL) 저장
+        current_data = []
         current_titles = []
 
-        for i in range(min(count, 10)): # 최신순으로 최대 10개 검사
+        # 상위 10개 추출
+        for i in range(min(count, 10)):
             row = rows.nth(i)
-            
-            # 1. 텍스트 추출 및 정제
             text_content = await row.inner_text()
             lines = [line.strip() for line in text_content.split('\n') if line.strip()]
             
-            # 스크린샷 구조상: lines[0]=카테고리, lines[1]=제목, lines[2]=날짜
-            if len(lines) < 2:
-                continue
-                
+            if len(lines) < 2: continue
+            
             title_text = lines[1]
-            # 'N' (New 아이콘) 제거
             if title_text.endswith(' N'):
                 title_text = title_text[:-2].strip()
             
-            # 2. URL 추출 (상세 페이지 클릭 대신 href 속성 찾기)
-            # 보통 row(div) 내부에 a 태그가 있거나, row 자체가 a 태그일 수 있음
+            # 링크 추출
             link_element = row.locator("a").first
             href = await link_element.get_attribute("href")
-            
-            if not href:
-                # 만약 a 태그를 못 찾으면 안전하게 클릭 방식으로 URL 획득 (예외 케이스)
-                await row.click()
-                await page.wait_for_load_state("commit")
-                detail_url = page.url
-                await page.go_back(wait_until="domcontentloaded")
-            else:
-                detail_url = f"https://maple.land{href}" if href.startswith("/") else href
+            detail_url = f"https://maple.land{href}" if href and href.startswith("/") else (href or list_url)
 
             current_data.append((title_text, detail_url))
             current_titles.append(title_text)
 
-        # 3. 데이터 비교 및 알림
+        # 기존 데이터와 비교
         old_titles = []
         if os.path.exists(db_file):
             with open(db_file, "r", encoding="utf-8") as f:
                 old_titles = [line.strip() for line in f if line.strip()]
 
-        # 새 게시글 확인 (역순으로 알림 보내기)
-        new_found = False
+        # 새 게시글 확인 및 전송
         for title, d_url in reversed(current_data):
             if title not in old_titles:
-                # 최초 실행 시(파일이 없을 때) 알림 폭탄 방지
-                if old_titles:
+                if old_titles: # 최초 실행이 아닐 때만 발송
                     msg = f"**[{name}] 새 소식**\n{title}\n{d_url}"
-                    requests.post(WEBHOOK_URL, json={"content": msg})
-                    print(f"🔔 새 게시글 발송: {title}")
-                new_found = True
+                    
+                    # [누락 방지] 디스코드 전송 및 상태 확인
+                    res = requests.post(WEBHOOK_URL, json={"content": msg})
+                    if res.status_code == 429: # Rate Limit 걸린 경우
+                        retry_after = res.json().get('retry_after', 1)
+                        await asyncio.sleep(retry_after)
+                        requests.post(WEBHOOK_URL, json={"content": msg})
+                    
+                    print(f"🔔 발송 완료: {title}")
+                    # 전송 간격 딜레이 (봇 누락 방지 핵심)
+                    await asyncio.sleep(0.8)
 
-        # 4. 파일 업데이트
+        # 파일 업데이트
         if current_titles:
             with open(db_file, "w", encoding="utf-8") as f:
                 f.write("\n".join(current_titles))
-            print(f"💾 {name} 완료 (상태 유지)")
+            print(f"💾 {name} 완료")
 
     except Exception as e:
-        print(f"❌ {name} 에러 발생: {e}")
+        print(f"❌ {name} 에러: {e}")
     finally:
         await page.close()
 
 async def main():
     async with async_playwright() as p:
-        # 실제 브라우저와 유사한 환경 설정 (User-Agent 등)
         browser = await p.chromium.launch(headless=True)
+        # 실제 사용자처럼 보이도록 User-Agent 설정
         context = await browser.new_context(
             viewport={'width': 1280, 'height': 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
         
-        # 모든 게시판 동시 스캔
-        tasks = [check_board(context, target) for target in TARGETS]
-        await asyncio.gather(*tasks)
-        
+        # [누락 방지] gather 대신 순차적으로 하나씩 처리
+        for target in TARGETS:
+            await check_board(context, target)
+            # 게시판 사이의 짧은 휴식
+            await asyncio.sleep(1.5)
+            
         await browser.close()
 
 if __name__ == "__main__":
