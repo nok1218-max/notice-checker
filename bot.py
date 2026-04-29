@@ -3,7 +3,9 @@ import asyncio
 from playwright.async_api import async_playwright
 import requests
 
+# 1. 설정값
 WEBHOOK_URL = "https://discord.com/api/webhooks/1496774829611679744/_keUpah8H1wPyBqMbhosb_71dr4amHQvyguQC6wpqpzNeb1rVj8I0uayV53RwTsEMvej"
+
 TARGETS = [
     {"name": "공지사항", "url": "https://maple.land/board/notices"},
     {"name": "이벤트", "url": "https://maple.land/board/events"},
@@ -18,81 +20,92 @@ async def check_board(context, board_info):
     page = await context.new_page()
     try:
         print(f"🔍 {name} 스캔 시작...")
-        # 렌더링 완료를 위해 networkidle 사용 (데이터 누락 방지)
+        # 페이지 로딩 대기
         await page.goto(list_url, wait_until="networkidle", timeout=30000)
         
-        # 게시글 요소들이 로드될 때까지 대기
-        await page.wait_for_selector('div.min-w-0.flex-1', timeout=15000)
+        # [핵심] 스크린샷에서 확인된 리스트 컨테이너가 나타날 때까지 대기
+        container_selector = "div.w-full.overflow-x-auto.rounded-lg"
+        await page.wait_for_selector(container_selector, timeout=15000)
         
-        # 상세 페이지 클릭 대신, 링크를 포함한 부모 요소를 찾습니다.
-        # 메플랜드 구조상 div 상위의 a 태그를 찾는 것이 안전합니다.
-        items = page.locator('a[href*="/board/"]') 
-        count = await items.count()
+        # 컨테이너 바로 아래에 있는 게시글 아이템(div)들만 선택
+        # 메뉴 텍스트가 섞이는 것을 방지하기 위해 자식 결합자(>) 사용
+        rows = page.locator(f"{container_selector} > div.flex.flex-col")
+        count = await rows.count()
 
-        current_data = [] # (제목, URL) 튜플 저장
-        
-        for i in range(min(count, 10)): # 넉넉하게 상위 10개 검사
-            item = items.nth(i)
-            href = await item.get_attribute("href")
-            if not href: continue
+        current_data = [] # (제목, URL) 저장
+        current_titles = []
+
+        for i in range(min(count, 10)): # 최신순으로 최대 10개 검사
+            row = rows.nth(i)
             
-            # 절대 경로 생성
-            detail_url = f"https://maple.land{href}" if href.startswith("/") else href
+            # 1. 텍스트 추출 및 정제
+            text_content = await row.inner_text()
+            lines = [line.strip() for line in text_content.split('\n') if line.strip()]
             
-            # 텍스트 추출 및 정제
-            raw_text = await item.inner_text()
-            lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
-            
-            # 보통 첫 번째 줄이 제목입니다. 'N' 표시 제거 로직 포함
-            if not lines: continue
-            title = lines[0]
-            if title.endswith(' N'): title = title[:-2].strip()
-            
-            # 중복/필터링
-            if title in ["공지사항", "이벤트", "개발일지"] or len(title) < 2:
+            # 스크린샷 구조상: lines[0]=카테고리, lines[1]=제목, lines[2]=날짜
+            if len(lines) < 2:
                 continue
                 
-            current_data.append((title, detail_url))
+            title_text = lines[1]
+            # 'N' (New 아이콘) 제거
+            if title_text.endswith(' N'):
+                title_text = title_text[:-2].strip()
+            
+            # 2. URL 추출 (상세 페이지 클릭 대신 href 속성 찾기)
+            # 보통 row(div) 내부에 a 태그가 있거나, row 자체가 a 태그일 수 있음
+            link_element = row.locator("a").first
+            href = await link_element.get_attribute("href")
+            
+            if not href:
+                # 만약 a 태그를 못 찾으면 안전하게 클릭 방식으로 URL 획득 (예외 케이스)
+                await row.click()
+                await page.wait_for_load_state("commit")
+                detail_url = page.url
+                await page.go_back(wait_until="domcontentloaded")
+            else:
+                detail_url = f"https://maple.land{href}" if href.startswith("/") else href
 
-        # 기존 데이터 불러오기
+            current_data.append((title_text, detail_url))
+            current_titles.append(title_text)
+
+        # 3. 데이터 비교 및 알림
         old_titles = []
         if os.path.exists(db_file):
             with open(db_file, "r", encoding="utf-8") as f:
                 old_titles = [line.strip() for line in f if line.strip()]
 
         # 새 게시글 확인 (역순으로 알림 보내기)
-        new_items = []
-        for title, d_url in current_data:
+        new_found = False
+        for title, d_url in reversed(current_data):
             if title not in old_titles:
-                new_items.append((title, d_url))
-        
-        # 새 글이 있으면 알림 전송
-        for title, d_url in reversed(new_items):
-            msg = f"**[{name}] 새 소식**\n{title}\n{d_url}"
-            requests.post(WEBHOOK_URL, json={"content": msg})
-            print(f"🔔 새 알림: {title}")
+                # 최초 실행 시(파일이 없을 때) 알림 폭탄 방지
+                if old_titles:
+                    msg = f"**[{name}] 새 소식**\n{title}\n{d_url}"
+                    requests.post(WEBHOOK_URL, json={"content": msg})
+                    print(f"🔔 새 게시글 발송: {title}")
+                new_found = True
 
-        # 파일 갱신 (최신 데이터 저장)
-        if current_data:
+        # 4. 파일 업데이트
+        if current_titles:
             with open(db_file, "w", encoding="utf-8") as f:
-                # 제목만 저장
-                f.write("\n".join([item[0] for item in current_data]))
-            print(f"💾 {name} 업데이트 완료 ({len(new_items)}개 신규)")
+                f.write("\n".join(current_titles))
+            print(f"💾 {name} 완료 (상태 유지)")
 
     except Exception as e:
-        print(f"❌ {name} 에러: {e}")
+        print(f"❌ {name} 에러 발생: {e}")
     finally:
         await page.close()
 
 async def main():
     async with async_playwright() as p:
-        # 브라우저 실행 시 user_agent를 설정하면 차단 확률이 줄어듭니다.
+        # 실제 브라우저와 유사한 환경 설정 (User-Agent 등)
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
             viewport={'width': 1280, 'height': 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         )
         
+        # 모든 게시판 동시 스캔
         tasks = [check_board(context, target) for target in TARGETS]
         await asyncio.gather(*tasks)
         
